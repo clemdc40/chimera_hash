@@ -5,12 +5,14 @@
 #include <string>
 #include <cstring>
 #include <cstdint>
+#include <sstream>
 
+// ==================== CONSTANTES ====================
 static const size_t CHIMERA_HASH_SIZE_BITS = 512;
 static const size_t CHIMERA_HASH_SIZE      = CHIMERA_HASH_SIZE_BITS / 8;
-static const size_t BLOCK_SIZE_BITS = 1024;
-static const size_t BLOCK_SIZE      = BLOCK_SIZE_BITS / 8;
-static const unsigned int NUM_ROUNDS = 10;
+static const size_t BLOCK_SIZE_BITS        = 1024;
+static const size_t BLOCK_SIZE            = BLOCK_SIZE_BITS / 8;
+static const unsigned int NUM_ROUNDS       = 10;
 
 static const uint8_t SBOX[256] = {
     0x63, 0x7c, 0x77, 0x7b, 0xf2, 0x6b, 0x6f, 0xc5, 0x30, 0x01, 0x67, 0x2b, 0xfe, 0xd7, 0xab, 0x76,
@@ -31,6 +33,9 @@ static const uint8_t SBOX[256] = {
     0x8c, 0xa1, 0x89, 0x0d, 0xbf, 0xe6, 0x42, 0x68, 0x41, 0x99, 0x2d, 0x0f, 0xb0, 0x54, 0xbb, 0x16
 };
 
+// ==================== FONCTIONS INTERNES ====================
+
+// Substitution de tous les octets par la S-Box AES
 static void applySBox(std::array<uint8_t, CHIMERA_HASH_SIZE> &state)
 {
     for (auto &byte : state) {
@@ -38,6 +43,7 @@ static void applySBox(std::array<uint8_t, CHIMERA_HASH_SIZE> &state)
     }
 }
 
+// Matrice dite "chaotique", style MixColumns
 static const std::array<std::array<uint8_t, 8>, 8> CHAOTIC_MATRIX = {{
     {0x02, 0x03, 0x01, 0x01, 0x04, 0x07, 0x05, 0x02},
     {0x03, 0x05, 0x07, 0x01, 0x02, 0x06, 0x04, 0x03},
@@ -49,6 +55,7 @@ static const std::array<std::array<uint8_t, 8>, 8> CHAOTIC_MATRIX = {{
     {0x02, 0x03, 0x01, 0x03, 0x04, 0x07, 0x05, 0x06}
 }};
 
+// Mélange type MixColumns, bloc de 8 octets
 static void chaoticMix(std::array<uint8_t, CHIMERA_HASH_SIZE> &state)
 {
     for (size_t blockIndex = 0; blockIndex < 8; ++blockIndex) {
@@ -69,6 +76,7 @@ static void chaoticMix(std::array<uint8_t, CHIMERA_HASH_SIZE> &state)
                     if (b & 1) {
                         temp ^= a;
                     }
+                    // multiplication dans GF(2^8) avec polynôme 0x1b
                     a = (a << 1) ^ ((a & 0x80) ? 0x1b : 0x00);
                     b >>= 1;
                 }
@@ -83,6 +91,7 @@ static void chaoticMix(std::array<uint8_t, CHIMERA_HASH_SIZE> &state)
     }
 }
 
+// Décalage circulaire de l'état de "shiftBytes"
 static void rotateState(std::array<uint8_t, CHIMERA_HASH_SIZE> &state, size_t shiftBytes)
 {
     std::array<uint8_t, CHIMERA_HASH_SIZE> temp;
@@ -92,25 +101,30 @@ static void rotateState(std::array<uint8_t, CHIMERA_HASH_SIZE> &state, size_t sh
     state = temp;
 }
 
+// Round de type Feistel sur 512 bits (256 + 256)
 static void feistelRound(std::array<uint8_t, CHIMERA_HASH_SIZE> &state, unsigned round)
 {
     constexpr size_t halfSize = CHIMERA_HASH_SIZE / 2;
     std::array<uint8_t, halfSize> left;
     std::array<uint8_t, halfSize> right;
 
-    memcpy(left.data(),  state.data(),               halfSize);
-    memcpy(right.data(), state.data() + halfSize,    halfSize);
+    // Sépare en deux moitiés
+    memcpy(left.data(),  state.data(),            halfSize);
+    memcpy(right.data(), state.data() + halfSize, halfSize);
 
+    // F-function = SBOX(right[i]) ^ round
     for (size_t i = 0; i < halfSize; ++i) {
         uint8_t s = SBOX[right[i]];
         uint8_t r = (s ^ static_cast<uint8_t>(round)) & 0xFF;
-        left[i] = left[i] ^ r;
+        left[i] = static_cast<uint8_t>(left[i] ^ r);
     }
 
-    memcpy(state.data(),           right.data(), halfSize);
-    memcpy(state.data() + halfSize, left.data(), halfSize);
+    // Échange
+    memcpy(state.data(),            right.data(), halfSize);
+    memcpy(state.data() + halfSize, left.data(),  halfSize);
 }
 
+// État initial
 static std::array<uint8_t, CHIMERA_HASH_SIZE> initState()
 {
     std::array<uint8_t, CHIMERA_HASH_SIZE> state = {
@@ -126,46 +140,76 @@ static std::array<uint8_t, CHIMERA_HASH_SIZE> initState()
     return state;
 }
 
+// Compression d'un bloc de 128 octets dans l'état 512 bits
 static void chimeraCompress(std::array<uint8_t, CHIMERA_HASH_SIZE> &state, 
-    const uint8_t *block)
+                            const uint8_t *block)
 {
-for (size_t i = 0; i < CHIMERA_HASH_SIZE; ++i) {
-state[i] ^= block[i] ^ block[i + CHIMERA_HASH_SIZE];
-}
-for (unsigned round = 0; round < NUM_ROUNDS; ++round) {
-applySBox(state);
-chaoticMix(state);
-rotateState(state, (round + 1) % 16);
-feistelRound(state, round);
-}
+    // Combine la première et la seconde moitié du bloc via XOR
+    // bloc = 128 octets => i + CHIMERA_HASH_SIZE = i + 64
+    for (size_t i = 0; i < CHIMERA_HASH_SIZE; ++i) {
+        state[i] ^= block[i] ^ block[i + CHIMERA_HASH_SIZE];
+    }
+
+    // Effectue 10 tours (NUM_ROUNDS)
+    for (unsigned round = 0; round < NUM_ROUNDS; ++round) {
+        applySBox(state);
+        chaoticMix(state);
+        rotateState(state, (round + 1) % 16);
+        feistelRound(state, round);
+    }
 }
 
-
+// ==================== FONCTION DE HACHAGE AVEC PADDING CORRIGÉ ====================
 std::array<uint8_t, CHIMERA_HASH_SIZE> chimeraHash(const uint8_t *data, size_t len)
 {
     std::array<uint8_t, CHIMERA_HASH_SIZE> state = initState();
 
+    // 1) Traiter les blocs complets
     size_t fullBlocks = len / BLOCK_SIZE;
     for (size_t i = 0; i < fullBlocks; ++i) {
         chimeraCompress(state, data + i * BLOCK_SIZE);
     }
 
+    // 2) Gérer le bloc partiel
     size_t remaining = len % BLOCK_SIZE;
     uint8_t lastBlock[BLOCK_SIZE];
     memset(lastBlock, 0, BLOCK_SIZE);
     memcpy(lastBlock, data + fullBlocks * BLOCK_SIZE, remaining);
 
+    // On place l'octet 0x80
     lastBlock[remaining] = 0x80;
-    uint64_t bitLen = static_cast<uint64_t>(len * 8);
-    for (size_t i = 0; i < 8; ++i) {
-        lastBlock[BLOCK_SIZE - 1 - i] = static_cast<uint8_t>(bitLen >> (8 * i));
-    }
 
-    chimeraCompress(state, lastBlock);
+    // Longueur du message (en bits)
+    uint64_t bitLen = static_cast<uint64_t>(len) * 8ULL;
+
+    // 3) Vérifier si on a la place pour stocker le bitLen dans les 8 derniers octets
+    if (remaining + 1 + 8 <= BLOCK_SIZE) {
+        // On peut tout mettre dans ce bloc
+        for (size_t i = 0; i < 8; ++i) {
+            lastBlock[BLOCK_SIZE - 1 - i] = static_cast<uint8_t>(bitLen >> (8 * i));
+        }
+        // Compresser ce bloc final
+        chimeraCompress(state, lastBlock);
+    } else {
+        // On n'a pas la place, on compresse ce bloc partiel "sans la taille"
+        chimeraCompress(state, lastBlock);
+
+        // Puis on crée un second bloc plein de zéros
+        uint8_t secondBlock[BLOCK_SIZE];
+        memset(secondBlock, 0, BLOCK_SIZE);
+
+        // On y place la taille en bits dans les 8 derniers octets
+        for (size_t i = 0; i < 8; ++i) {
+            secondBlock[BLOCK_SIZE - 1 - i] = static_cast<uint8_t>(bitLen >> (8 * i));
+        }
+        // Compresser ce second bloc
+        chimeraCompress(state, secondBlock);
+    }
 
     return state;
 }
 
+// ==================== CONVERSION EN HEXA ====================
 static std::string toHexString(const std::array<uint8_t, CHIMERA_HASH_SIZE> &hashVal)
 {
     std::ostringstream oss;
@@ -176,7 +220,9 @@ static std::string toHexString(const std::array<uint8_t, CHIMERA_HASH_SIZE> &has
     return oss.str();
 }
 
-/*int main()
+/*
+// Exemple d'utilisation
+int main()
 {
     std::string input = "test";
     auto result = chimeraHash(reinterpret_cast<const uint8_t*>(input.data()), input.size());
